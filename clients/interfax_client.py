@@ -7,3 +7,5 @@ interfax_client = InterfaxClient(
     login=_config.interfax.login,
     password=_config.interfax.password
 )
+
+

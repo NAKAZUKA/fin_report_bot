@@ -56,6 +56,16 @@ def init_db():
             );
             """
         )
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_companies (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                company_name TEXT,
+                inn TEXT NOT NULL,
+                ogrn TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
 
 def has_event_been_processed(event_uid: str) -> bool:
     with get_db() as conn:
@@ -124,3 +134,45 @@ def save_message(
                 message_url
             )
         )
+
+
+def get_report_by_uid(event_uid: str):
+    with get_db() as conn:
+        return conn.execute(
+            "SELECT * FROM reports WHERE event_uid = ?", (event_uid,)
+        ).fetchone()
+
+
+def get_last_reports(limit: int = 5):
+    with get_db() as conn:
+        return conn.execute(
+            """
+            SELECT * FROM reports
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (limit,)
+        ).fetchall()
+
+
+def add_user_company(user_id: int, inn: str, name: str, ogrn: str = None):
+    with get_db() as conn:
+        conn.execute("""
+            INSERT INTO user_companies (user_id, inn, company_name, ogrn)
+            VALUES (?, ?, ?, ?)
+        """, (user_id, inn, name, ogrn))
+
+def remove_user_company(user_id: int, inn: str):
+    with get_db() as conn:
+        conn.execute("""
+            DELETE FROM user_companies
+            WHERE user_id = ? AND inn = ?
+        """, (user_id, inn))
+
+def list_user_companies(user_id: int) -> list[dict]:
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT * FROM user_companies WHERE user_id = ?
+            ORDER BY created_at DESC
+        """, (user_id,)).fetchall()
+        return [dict(row) for row in rows]

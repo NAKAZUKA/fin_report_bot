@@ -16,5 +16,9 @@ def main_menu(is_subscribed: bool) -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton(text="📂 Найти отчёт", callback_data="search_reports")
         ],
+        [
+            InlineKeyboardButton(text="🏢 Мои компании", callback_data="manage_companies")
+        ],
+
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)

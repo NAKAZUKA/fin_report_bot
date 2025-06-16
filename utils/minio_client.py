@@ -3,6 +3,8 @@ from minio.error import S3Error
 from dotenv import load_dotenv
 import os
 from loguru import logger
+import io
+
 
 load_dotenv()
 
@@ -22,13 +24,30 @@ def ensure_bucket():
 
 def upload_file(file_bytes: bytes, filename: str) -> str:
     ensure_bucket()
+    stream = io.BytesIO(file_bytes)
+
     client.put_object(
         bucket_name=MINIO_BUCKET,
         object_name=filename,
-        data=bytes(file_bytes),
+        data=stream,
         length=len(file_bytes),
-        content_type="application/pdf"
+        content_type="application/pdf",
+        part_size=30 * 1024 * 1024
     )
-    url = f"http://{client._endpoint}/{MINIO_BUCKET}/{filename}"
+
+    MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "localhost:9000")
+    url = f"http://{MINIO_ENDPOINT}/{MINIO_BUCKET}/{filename}"
     logger.info(f"📁 Файл загружен в MinIO: {url}")
     return url
+
+
+
+def download_file(filename: str) -> bytes:
+    try:
+        response = client.get_object(MINIO_BUCKET, filename)
+        data = response.read()
+        response.close()
+        return data
+    except S3Error as e:
+        logger.error(f"❌ Ошибка загрузки файла из MinIO: {e}")
+        raise

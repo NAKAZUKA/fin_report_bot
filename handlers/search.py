@@ -1,169 +1,134 @@
-from aiogram import Router, F
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram import Router, F, types
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.state import StatesGroup, State
+from datetime import datetime
 
-import json
-from pathlib import Path
-
+from db import list_user_companies, get_db
 from clients.interfax_client import interfax_client
 from keyboards.main import main_menu
 
 router = Router()
 
-COMPANIES_PATH = Path(__file__).parent.parent.parent / "data" / "companies.json"
-with open(COMPANIES_PATH, encoding="utf-8") as f:
-    COMPANIES: dict[str, str] = json.load(f)
-
 class SearchStates(StatesGroup):
     choosing_company = State()
-    choosing_type = State()
+    choosing_category = State()
     choosing_year = State()
     showing_results = State()
 
-def company_list_keyboard() -> InlineKeyboardMarkup:
+CATEGORIES = [
+    "бухгалтерская", "финансовая", "МСФО", "консолидированная", "годовая"
+]
+
+CATEGORY_KEYBOARD = InlineKeyboardMarkup(
+    inline_keyboard=[
+        [InlineKeyboardButton(text=c.title(), callback_data=f"cat_{c}")] for c in CATEGORIES
+    ] + [[InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_menu")]]
+)
+
+def years_keyboard() -> InlineKeyboardMarkup:
+    current_year = datetime.now().year
     buttons = [
-        [InlineKeyboardButton(text=name, callback_data=f"choose_company_{inn}")]
-        for name, inn in COMPANIES.items()
+        [InlineKeyboardButton(text=str(y), callback_data=f"year_{y}")]
+        for y in range(current_year, current_year - 5, -1)
     ]
-    buttons.append([InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_search")])
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-def type_list_keyboard(types: list[dict], page: int = 0, per_page: int = 20) -> InlineKeyboardMarkup:
-    start = page * per_page
-    end = start + per_page
-    visible = types[start:end]
-
-    buttons = [
-        [InlineKeyboardButton(text=t["name"], callback_data=f"choose_type_{t['id']}")]
-        for t in visible
-    ]
-
-    nav_buttons = []
-    if start > 0:
-        nav_buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"types_page_{page-1}"))
-    if end < len(types):
-        nav_buttons.append(InlineKeyboardButton(text="➡️ Вперёд", callback_data=f"types_page_{page+1}"))
-    if nav_buttons:
-        buttons.append(nav_buttons)
-
-    buttons.append([InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_search")])
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-def year_list_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=str(y), callback_data=f"choose_year_{y}")]
-        for y in range(2024, 2018, -1)
-    ] + [[InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_search")]])
-
-def make_reports_keyboard(events: list[dict], page: int = 0, per_page: int = 5) -> InlineKeyboardMarkup:
-    start = page * per_page
-    end = start + per_page
-    buttons = []
-
-    for e in events[start:end]:
-        report_type = e["file"]["type"]["name"]
-        pub_date = e["file"]["attributes"].get("DatePub", "??")
-        url = e["file"]["publicUrl"]
-        buttons.append([
-            InlineKeyboardButton(text=f"{report_type} — {pub_date}", url=url)
-        ])
-
-    nav_buttons = []
-    if start > 0:
-        nav_buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"page_{page-1}"))
-    if end < len(events):
-        nav_buttons.append(InlineKeyboardButton(text="➡️ Вперёд", callback_data=f"page_{page+1}"))
-    if nav_buttons:
-        buttons.append(nav_buttons)
-
-    buttons.append([InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_search")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_menu")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 @router.callback_query(F.data == "search_reports")
-async def start_search(callback: CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("🔍 Выберите компанию:", reply_markup=company_list_keyboard())
+async def search_start(callback: types.CallbackQuery, state: FSMContext):
+    companies = list_user_companies(callback.from_user.id)
+    if not companies:
+        await callback.message.edit_text("❌ У вас нет сохранённых компаний.")
+        return
+
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=f"{c['company_name']} ({c['inn']})", callback_data=f"company_{c['inn']}")]
+            for c in companies
+        ] + [[InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_menu")]]
+    )
+    await callback.message.edit_text("🔍 Выберите компанию для поиска:", reply_markup=kb)
     await state.set_state(SearchStates.choosing_company)
     await callback.answer()
 
-@router.callback_query(F.data.startswith("choose_company_"))
-async def choose_company(callback: CallbackQuery, state: FSMContext):
-    inn = callback.data.split("_")[2]
-    await state.update_data(inn=inn)
-    await callback.message.edit_text("📂 Загружаем типы отчётности...")
-
-    try:
-        # Получаем типы файлов (отчетности)
-        types = await interfax_client.get_file_types()
-    except Exception as e:
-        await callback.message.edit_text(f"Ошибка получения типов: {e}")
-        return
-
-    await state.update_data(types=types)
-    await state.set_state(SearchStates.choosing_type)
-    await callback.message.edit_text("📂 Выберите тип отчётности:", reply_markup=type_list_keyboard(types))
+@router.callback_query(SearchStates.choosing_company, F.data.startswith("company_"))
+async def choose_category(callback: types.CallbackQuery, state: FSMContext):
+    inn = callback.data.split("_")[1]
+    await state.update_data(subject_code=inn)
+    await callback.message.edit_text("🗂 Выберите категорию отчётности:", reply_markup=CATEGORY_KEYBOARD)
+    await state.set_state(SearchStates.choosing_category)
     await callback.answer()
 
-@router.callback_query(F.data.startswith("choose_type_"))
-async def choose_type(callback: CallbackQuery, state: FSMContext):
-    type_id = int(callback.data.split("_")[2])
-    await state.update_data(file_type_id=type_id)
-    await callback.message.edit_text("📅 Выберите год публикации:", reply_markup=year_list_keyboard())
+@router.callback_query(SearchStates.choosing_category, F.data.startswith("cat_"))
+async def choose_year(callback: types.CallbackQuery, state: FSMContext):
+    category = callback.data.split("_", 1)[1]
+    await state.update_data(category=category)
+    await callback.message.edit_text("📅 Выберите год публикации:", reply_markup=years_keyboard())
     await state.set_state(SearchStates.choosing_year)
     await callback.answer()
 
-@router.callback_query(F.data.startswith("choose_year_"))
-async def choose_year(callback: CallbackQuery, state: FSMContext):
-    year = int(callback.data.split("_")[2])  # Получаем выбранный год
-    data = await state.get_data()  # Получаем данные из состояния
-    inn = data["inn"]  # Получаем ИНН компании
-    file_type_id = data["file_type_id"]  # Получаем тип отчета (категория)
-    company_name = next((name for name, code in COMPANIES.items() if code == inn), "неизвестная компания")
+@router.callback_query(SearchStates.choosing_year, F.data.startswith("year_"))
+async def show_results(callback: types.CallbackQuery, state: FSMContext):
+    year = int(callback.data.split("_")[1])
+    data = await state.get_data()
+    subject_code = data["subject_code"]
+    category = data["category"]
 
-    await callback.message.edit_text("⏳ Ищем отчёты...")
+    await callback.message.edit_text("🔄 Поиск отчётов...")
 
     try:
-        # Получаем только отчеты с файлами, фильтруем по типу и году
-        events = await interfax_client.get_filtered_reports(subject_code=inn, file_type=file_type_id, year=year)
+        results = await interfax_client.search_reports_by_category(subject_code, category, year)
     except Exception as e:
-        await callback.message.edit_text(f"Ошибка при запросе: {e}")
+        await callback.message.edit_text(f"❌ Ошибка при поиске: {e}")
+        await state.clear()
         return
 
-    if not events:
-        await callback.message.edit_text(
-            f"⛔️ Отчёты за {year} год не найдены для компании <b>{company_name}</b>.",
-            reply_markup=main_menu(True)
+    if not results:
+        await callback.message.edit_text("📭 Ничего не найдено по вашему запросу.")
+        with get_db() as conn:
+            res = conn.execute("SELECT is_subscribed FROM users WHERE user_id = ?", (callback.from_user.id,)).fetchone()
+            is_sub = bool(res["is_subscribed"]) if res else False
+        await callback.message.answer("🏠 Возврат в главное меню.", reply_markup=main_menu(is_sub))
+        await state.clear()
+        return
+
+    await state.update_data(results=results, offset=0)
+    await show_next_batch(callback.message, state)
+
+async def show_next_batch(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    results = data.get("results", [])
+    offset = data.get("offset", 0)
+    batch = results[offset:offset + 10]
+
+    for r in batch:
+        file = r["file"]
+        attrs = file["attributes"]
+        caption = (
+            f"🏢 <b>{r['subject'].get('shortName', 'Компания')}</b>\n"
+            f"📄 <b>{file['type']['name']}</b>\n"
+            f"🗓 Год: <b>{attrs.get('YearRep', 'не указано')}</b>\n"
+            f"🗓 Дата публикации: <b>{attrs.get('DatePub', '-')}</b>\n"
+            f"🔗 <a href=\"{file['publicUrl']}\">Скачать</a>"
         )
-        return
+        await message.answer(caption, parse_mode="HTML", disable_web_page_preview=False)
 
-    await state.update_data(events=events, page=0, company_name=company_name)
-    await state.set_state(SearchStates.showing_results)
+    new_offset = offset + len(batch)
+    if new_offset < len(results):
+        await state.update_data(offset=new_offset)
+        await message.answer("⬇️ Показать ещё отчёты", reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="🔽 Показать ещё", callback_data="show_more")]]
+        ))
+        await state.set_state(SearchStates.showing_results)
+    else:
+        with get_db() as conn:
+            res = conn.execute("SELECT is_subscribed FROM users WHERE user_id = ?", (message.chat.id,)).fetchone()
+            is_sub = bool(res["is_subscribed"]) if res else False
+        await message.answer("✅ Все результаты показаны.", reply_markup=main_menu(is_sub))
+        await state.clear()
 
-    text = (
-        f"📥 <b>Найденные отчёты</b> для компании <b>{company_name}</b>:\n"
-        f"Всего: {len(events)} документов."
-    )
-
-    await callback.message.edit_text(text, reply_markup=make_reports_keyboard(events, page=0))
-    await callback.message.answer("📋 Главное меню:", reply_markup=main_menu(True))
-    await callback.answer()
-
-@router.callback_query(F.data == "cancel_search")
-async def cancel_search(callback: CallbackQuery, state: FSMContext):
-    await state.clear()
-
-    # Проверка подписки пользователя для показа нужного главного меню
-    from db import get_db
-    is_sub = False
-    with get_db() as conn:
-        res = conn.execute(
-            "SELECT is_subscribed FROM users WHERE user_id = ?", (callback.from_user.id,)
-        ).fetchone()
-        is_sub = bool(res["is_subscribed"]) if res else False
-
-    # Перезаписываем текущее сообщение, чтобы не дублировать меню
-    await callback.message.edit_text(
-        "❌ Поиск отменён. Вы вернулись в главное меню.",
-        reply_markup=main_menu(is_sub)
-    )
+@router.callback_query(SearchStates.showing_results, F.data == "show_more")
+async def show_more(callback: types.CallbackQuery, state: FSMContext):
+    await show_next_batch(callback.message, state)
     await callback.answer()

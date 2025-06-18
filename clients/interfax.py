@@ -1,5 +1,8 @@
 # ✅ clients/interfax.py
 import httpx
+import os
+import tempfile
+import zipfile
 from datetime import datetime
 from typing import Optional
 from pydantic import BaseModel
@@ -46,10 +49,8 @@ class InterfaxClient:
 
     async def get_token(self) -> str:
         token, exp_str = load_token_from_file()
-
         if not token or is_token_expired(exp_str):
             return await self._authorize()
-
         self._token = token
         return self._token
 
@@ -114,7 +115,9 @@ class InterfaxClient:
                 return subject
         return None
 
-    async def search_reports_by_category(self, subject_code: str, category_name: str, year: int, count: int = 100) -> list[dict]:
+    async def search_reports_by_category(
+        self, subject_code: str, category_name: str, year: int, count: int = 100
+    ) -> list[dict]:
         token = await self.get_token()
         headers = {"APIKey": token}
         params = {
@@ -122,7 +125,9 @@ class InterfaxClient:
             "subjectCode": [subject_code],
             "count": count
         }
-        response = await self._client.get(f"{self.BASE_URL}/disclosure/events", headers=headers, params=params)
+        response = await self._client.get(
+            f"{self.BASE_URL}/disclosure/events", headers=headers, params=params
+        )
         response.raise_for_status()
         events = response.json()
 
@@ -140,72 +145,47 @@ class InterfaxClient:
                 continue
             results.append(event)
         return results
-    
+
+    async def download_and_extract_file(self, file_data: dict) -> list[str]:
+        """
+        Скачивает файл через publicUrl и, если это ZIP — распаковывает.
+        Возвращает список путей к PDF-файлам.
+        """
+        public_url = file_data.get("publicUrl")
+        file_name = file_data.get("type", {}).get("name", "report").replace(" ", "_")
+        uid = file_data.get("uid", "")[:6]
+        base_name = f"{file_name}_{uid}"
+
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.get(public_url, headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True)
+            resp.raise_for_status()
+            content_type = resp.headers.get("Content-Type", "").lower()
+
+            suffix = ".zip" if "zip" in content_type or "octet-stream" in content_type else ".pdf"
+            bin_path = os.path.join(tempfile.gettempdir(), base_name + suffix)
+
+            with open(bin_path, "wb") as f:
+                f.write(resp.content)
+
+            logger.info(f"📥 Файл скачан: {bin_path}")
+
+            if suffix == ".pdf":
+                return [bin_path]
+
+            # ZIP-архив: распаковка
+            zip_path = bin_path
+            extracted_dir = os.path.join(tempfile.gettempdir(), f"unzipped_{uid}")
+            os.makedirs(extracted_dir, exist_ok=True)
+
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                zip_ref.extractall(extracted_dir)
+
+            pdfs = [
+                os.path.join(extracted_dir, name)
+                for name in zip_ref.namelist()
+                if name.lower().endswith(".pdf")
+            ]
+            return pdfs
+
     async def close(self):
         await self._client.aclose()
-
-    async def download_file(self, file_data: dict) -> bytes:
-        """
-        Скачивает файл из Интерфакс API либо по UID, либо по publicUrl.
-        Отдаёт байтовое содержимое файла, если удалось скачать PDF.
-        """
-        token = await self.get_token()
-        user_agent = {"User-Agent": "Mozilla/5.0"}
-        headers = {"APIKey": token, **user_agent}
-
-        file_uid = file_data.get("uid")
-        public_url = file_data.get("publicUrl")
-
-        if not file_uid and not public_url:
-            raise ValueError("❌ Нет ни UID, ни publicUrl — невозможно скачать файл")
-
-        file_url = f"{self.BASE_URL}/disclosure/download/files/{file_uid}" if file_uid else None
-
-        # 🧪 Пробуем сначала скачать по UID через Range-запросы
-        if file_url:
-            try:
-                head_resp = await self._client.head(file_url, headers=headers)
-                if head_resp.status_code == 404:
-                    logger.warning("⚠️ Файл по UID не найден, переходим к publicUrl.")
-                    raise FileNotFoundError()
-
-                head_resp.raise_for_status()
-                total_size = int(head_resp.headers.get("Content-Length", "0"))
-                logger.info(f"📦 Размер файла: {total_size} байт")
-
-                chunks = []
-                downloaded = 0
-                attempt = 1
-                while downloaded < total_size:
-                    start = downloaded
-                    end = min(start + self.CHUNK_SIZE - 1, total_size - 1)
-                    range_header = {"Range": f"bytes={start}-{end}"}
-                    logger.info(f"📥 Загрузка: bytes={start}-{end}")
-
-                    resp = await self._client.get(file_url, headers={**headers, **range_header})
-                    resp.raise_for_status()
-
-                    chunks.append(resp.content)
-                    downloaded += len(resp.content)
-                    attempt += 1
-
-                full_content = b"".join(chunks)
-                if len(full_content) != total_size:
-                    logger.warning("⚠️ Итоговый размер не совпадает с Content-Length")
-                return full_content
-
-            except Exception as e:
-                logger.warning(f"⚠️ Ошибка при загрузке по UID: {e}. Пробуем через publicUrl...")
-
-        # 🔄 Fallback: загрузка через publicUrl
-        try:
-            resp = await self._client.get(public_url, headers=user_agent, follow_redirects=True)
-            resp.raise_for_status()
-            content_type = resp.headers.get("Content-Type", "")
-            if "application/pdf" not in content_type.lower():
-                logger.warning(f"⚠️ Не PDF-файл. Content-Type: {content_type}")
-                raise ValueError("Получен не PDF-файл. Публикация могла быть удалена.")
-            return resp.content
-        except Exception as e:
-            logger.error(f"❌ Ошибка при скачивании по publicUrl: {e}")
-            raise

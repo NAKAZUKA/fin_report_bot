@@ -11,18 +11,15 @@ def get_db():
 
 def init_db():
     with get_db() as conn:
-        conn.execute(
-            """
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
                 full_name TEXT,
                 is_subscribed BOOLEAN NOT NULL DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
-            """
-        )
-        conn.execute(
-            """
+        """)
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS reports (
                 event_uid TEXT PRIMARY KEY,
                 company_name TEXT,
@@ -33,17 +30,13 @@ def init_db():
                 document_url_in_minio TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
-            """
-        )
-        conn.execute(
-            """
+        """)
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS processed_events (
                 event_uid TEXT PRIMARY KEY
             );
-            """
-        )
-        conn.execute(
-            """
+        """)
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS messages (
                 event_uid TEXT PRIMARY KEY,
                 company_name TEXT,
@@ -54,8 +47,7 @@ def init_db():
                 message_url TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
-            """
-        )
+        """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS user_companies (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -66,6 +58,37 @@ def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
+        conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_user_company
+            ON user_companies(user_id, inn);
+        """)
+
+def add_user_company(user_id: int, inn: str, name: str, ogrn: str = None):
+    with get_db() as conn:
+        existing = conn.execute("""
+            SELECT 1 FROM user_companies WHERE user_id = ? AND inn = ?
+        """, (user_id, inn)).fetchone()
+
+        if not existing:
+            conn.execute("""
+                INSERT INTO user_companies (user_id, inn, company_name, ogrn)
+                VALUES (?, ?, ?, ?)
+            """, (user_id, inn, name, ogrn))
+
+def remove_user_company(user_id: int, inn: str):
+    with get_db() as conn:
+        conn.execute("""
+            DELETE FROM user_companies
+            WHERE user_id = ? AND inn = ?
+        """, (user_id, inn))
+
+def list_user_companies(user_id: int) -> list[dict]:
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT * FROM user_companies WHERE user_id = ?
+            ORDER BY created_at DESC
+        """, (user_id,)).fetchall()
+        return [dict(row) for row in rows]
 
 def has_event_been_processed(event_uid: str) -> bool:
     with get_db() as conn:
@@ -135,13 +158,11 @@ def save_message(
             )
         )
 
-
 def get_report_by_uid(event_uid: str):
     with get_db() as conn:
         return conn.execute(
             "SELECT * FROM reports WHERE event_uid = ?", (event_uid,)
         ).fetchone()
-
 
 def get_last_reports(limit: int = 5):
     with get_db() as conn:
@@ -153,26 +174,3 @@ def get_last_reports(limit: int = 5):
             """,
             (limit,)
         ).fetchall()
-
-
-def add_user_company(user_id: int, inn: str, name: str, ogrn: str = None):
-    with get_db() as conn:
-        conn.execute("""
-            INSERT INTO user_companies (user_id, inn, company_name, ogrn)
-            VALUES (?, ?, ?, ?)
-        """, (user_id, inn, name, ogrn))
-
-def remove_user_company(user_id: int, inn: str):
-    with get_db() as conn:
-        conn.execute("""
-            DELETE FROM user_companies
-            WHERE user_id = ? AND inn = ?
-        """, (user_id, inn))
-
-def list_user_companies(user_id: int) -> list[dict]:
-    with get_db() as conn:
-        rows = conn.execute("""
-            SELECT * FROM user_companies WHERE user_id = ?
-            ORDER BY created_at DESC
-        """, (user_id,)).fetchall()
-        return [dict(row) for row in rows]

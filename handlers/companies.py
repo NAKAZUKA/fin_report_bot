@@ -45,11 +45,23 @@ async def handle_inn_input(message: types.Message, state: FSMContext):
         subject = await interfax_client.probe_company_info(code)
         if not subject:
             await message.answer("⚠️ Компания не найдена. Попробуйте ещё раз:\n\n✍️ Введите ИНН или ОГРН:")
-            return  # Остаёмся в состоянии ожидания
+            return
 
         name = subject.get("shortName") or subject.get("fullName") or "Неизвестно"
         inn = subject.get("inn", code)
         ogrn = subject.get("ogrn", "")
+
+        # 🔍 Проверка: уже есть в подписке?
+        companies = list_user_companies(message.from_user.id)
+        if any(c['inn'] == inn for c in companies):
+            await message.answer(
+                f"⚠️ Компания <b>{name}</b> уже есть в вашем списке.",
+                reply_markup=companies_keyboard(companies)
+            )
+            await state.clear()
+            return
+
+        # ✅ Добавляем
         add_user_company(message.from_user.id, inn=inn, name=name, ogrn=ogrn)
 
         companies = list_user_companies(message.from_user.id)
@@ -58,9 +70,11 @@ async def handle_inn_input(message: types.Message, state: FSMContext):
             reply_markup=companies_keyboard(companies)
         )
         await state.clear()
+
     except Exception as e:
         await message.answer(f"❌ Ошибка при запросе: {e}")
         await state.clear()
+
 
 @router.callback_query(F.data.startswith("del_company_"))
 async def delete_company(callback: types.CallbackQuery):

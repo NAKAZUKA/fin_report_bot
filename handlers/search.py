@@ -1,5 +1,8 @@
+# ✅ handlers/search.py
+
 from aiogram import Router, F, types
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types.input_file import FSInputFile
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from datetime import datetime
@@ -10,11 +13,13 @@ from keyboards.main import main_menu
 
 router = Router()
 
+
 class SearchStates(StatesGroup):
     choosing_company = State()
     choosing_category = State()
     choosing_year = State()
     showing_results = State()
+
 
 CATEGORIES = [
     "бухгалтерская", "финансовая", "МСФО", "консолидированная", "годовая"
@@ -26,6 +31,7 @@ CATEGORY_KEYBOARD = InlineKeyboardMarkup(
     ] + [[InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_menu")]]
 )
 
+
 def years_keyboard() -> InlineKeyboardMarkup:
     current_year = datetime.now().year
     buttons = [
@@ -34,6 +40,7 @@ def years_keyboard() -> InlineKeyboardMarkup:
     ]
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_menu")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
 
 @router.callback_query(F.data == "search_reports")
 async def search_start(callback: types.CallbackQuery, state: FSMContext):
@@ -52,6 +59,7 @@ async def search_start(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(SearchStates.choosing_company)
     await callback.answer()
 
+
 @router.callback_query(SearchStates.choosing_company, F.data.startswith("company_"))
 async def choose_category(callback: types.CallbackQuery, state: FSMContext):
     inn = callback.data.split("_")[1]
@@ -60,6 +68,7 @@ async def choose_category(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(SearchStates.choosing_category)
     await callback.answer()
 
+
 @router.callback_query(SearchStates.choosing_category, F.data.startswith("cat_"))
 async def choose_year(callback: types.CallbackQuery, state: FSMContext):
     category = callback.data.split("_", 1)[1]
@@ -67,6 +76,7 @@ async def choose_year(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.edit_text("📅 Выберите год публикации:", reply_markup=years_keyboard())
     await state.set_state(SearchStates.choosing_year)
     await callback.answer()
+
 
 @router.callback_query(SearchStates.choosing_year, F.data.startswith("year_"))
 async def show_results(callback: types.CallbackQuery, state: FSMContext):
@@ -96,6 +106,7 @@ async def show_results(callback: types.CallbackQuery, state: FSMContext):
     await state.update_data(results=results, offset=0)
     await show_next_batch(callback.message, state)
 
+
 async def show_next_batch(message: types.Message, state: FSMContext):
     data = await state.get_data()
     results = data.get("results", [])
@@ -105,14 +116,29 @@ async def show_next_batch(message: types.Message, state: FSMContext):
     for r in batch:
         file = r["file"]
         attrs = file["attributes"]
+
         caption = (
             f"🏢 <b>{r['subject'].get('shortName', 'Компания')}</b>\n"
             f"📄 <b>{file['type']['name']}</b>\n"
             f"🗓 Год: <b>{attrs.get('YearRep', 'не указано')}</b>\n"
-            f"🗓 Дата публикации: <b>{attrs.get('DatePub', '-')}</b>\n"
-            f"🔗 <a href=\"{file['publicUrl']}\">Скачать</a>"
+            f"🗓 Дата публикации: <b>{attrs.get('DatePub', '-')}</b>"
         )
-        await message.answer(caption, parse_mode="HTML", disable_web_page_preview=False)
+
+        try:
+            pdf_paths = await interfax_client.download_and_extract_file(file)
+            if pdf_paths:
+                # создаём имя файла из атрибутов
+                name_part = file['type']['name'].replace(" ", "_")
+                uid = file.get("uid", "")[:6]
+                year = attrs.get("YearRep", "год")
+                clean_filename = f"{name_part}_{year}_{uid}.pdf"
+
+                doc = FSInputFile(path=pdf_paths[0], filename=clean_filename)
+                await message.answer_document(document=doc, caption=caption, parse_mode="HTML")
+            else:
+                await message.answer(f"{caption}\n❌ Не удалось получить файл.")
+        except Exception as e:
+            await message.answer(f"{caption}\n❌ Ошибка при скачивании: {e}")
 
     new_offset = offset + len(batch)
     if new_offset < len(results):
@@ -127,6 +153,7 @@ async def show_next_batch(message: types.Message, state: FSMContext):
             is_sub = bool(res["is_subscribed"]) if res else False
         await message.answer("✅ Все результаты показаны.", reply_markup=main_menu(is_sub))
         await state.clear()
+
 
 @router.callback_query(SearchStates.showing_results, F.data == "show_more")
 async def show_more(callback: types.CallbackQuery, state: FSMContext):

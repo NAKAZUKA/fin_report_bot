@@ -10,6 +10,7 @@ dependencies = [
     "httpx>=0.28.1",
     "loguru~=0.7",
     "minio>=7.2.15",
+    "py7zr>=1.0.0",
     "pydantic>=2.11.3",
     "python-dotenv~=1.0",
 ]

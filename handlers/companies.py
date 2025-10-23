@@ -12,6 +12,7 @@ router = Router()
 class CompanyStates(StatesGroup):
     waiting_for_inn = State()
 
+
 def companies_keyboard(companies: list[dict]) -> InlineKeyboardMarkup:
     buttons = [
         [InlineKeyboardButton(text=f"❌ {c['company_name']} ({c['inn']})", callback_data=f"del_company_{c['inn']}")]
@@ -20,6 +21,13 @@ def companies_keyboard(companies: list[dict]) -> InlineKeyboardMarkup:
     buttons.append([InlineKeyboardButton(text="➕ Добавить", callback_data="add_company")])
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_menu")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def back_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_companies")]]
+    )
+
 
 @router.callback_query(F.data == "manage_companies")
 async def manage_companies(callback: types.CallbackQuery):
@@ -31,20 +39,37 @@ async def manage_companies(callback: types.CallbackQuery):
                                          reply_markup=companies_keyboard([]))
     await callback.answer()
 
+
 @router.callback_query(F.data == "add_company")
 async def ask_inn(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("✍️ Введите ИНН или ОГРН компании:")
+    await callback.message.edit_text("✍️ Введите ИНН или ОГРН компании:", reply_markup=back_keyboard())
     await state.set_state(CompanyStates.waiting_for_inn)
     await callback.answer()
+
+
+@router.callback_query(CompanyStates.waiting_for_inn, F.data == "back_to_companies")
+async def back_to_company_list(callback: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    companies = list_user_companies(callback.from_user.id)
+    await callback.message.edit_text("📄 <b>Ваши компании</b>:", reply_markup=companies_keyboard(companies))
+    await callback.answer()
+
 
 @router.message(CompanyStates.waiting_for_inn)
 async def handle_inn_input(message: types.Message, state: FSMContext):
     code = message.text.strip()
 
+    # 🔍 Проверка на валидность (ИНН: 10 или 12 цифр, ОГРН: 13 цифр)
+    if not code.isdigit() or len(code) not in (10, 12, 13):
+        await message.answer("⚠️ Неверный формат ИНН/ОГРН. Попробуйте ещё раз:\n\n✍️ Введите ИНН или ОГРН компании:",
+                             reply_markup=back_keyboard())
+        return
+
     try:
         subject = await interfax_client.probe_company_info(code)
         if not subject:
-            await message.answer("⚠️ Компания не найдена. Попробуйте ещё раз:\n\n✍️ Введите ИНН или ОГРН:")
+            await message.answer("⚠️ Компания не найдена. Попробуйте ещё раз:\n\n✍️ Введите ИНН или ОГРН:",
+                                 reply_markup=back_keyboard())
             return
 
         name = subject.get("shortName") or subject.get("fullName") or "Неизвестно"
@@ -83,6 +108,7 @@ async def delete_company(callback: types.CallbackQuery):
     companies = list_user_companies(callback.from_user.id)
     await callback.message.edit_text("📄 <b>Обновлён список компаний</b>:", reply_markup=companies_keyboard(companies))
     await callback.answer()
+
 
 @router.callback_query(F.data == "back_to_menu")
 async def back_to_main(callback: types.CallbackQuery):

@@ -1,5 +1,5 @@
 # ✅ handlers/search.py
-
+import os
 from aiogram import Router, F, types
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.types.input_file import FSInputFile
@@ -113,9 +113,17 @@ async def show_next_batch(message: types.Message, state: FSMContext):
     offset = data.get("offset", 0)
     batch = results[offset:offset + 10]
 
+    seen = set()  # UID или publicUrl
     for r in batch:
-        file = r["file"]
-        attrs = file["attributes"]
+        file = r.get("file", {})
+        attrs = file.get("attributes", {})
+        public_url = file.get("publicUrl")
+
+        uid = r.get("uid") or file.get("uid")
+        if uid in seen or public_url in seen:
+            continue
+        seen.add(uid)
+        seen.add(public_url)
 
         caption = (
             f"🏢 <b>{r['subject'].get('shortName', 'Компания')}</b>\n"
@@ -125,20 +133,22 @@ async def show_next_batch(message: types.Message, state: FSMContext):
         )
 
         try:
-            pdf_paths = await interfax_client.download_and_extract_file(file)
-            if pdf_paths:
-                # создаём имя файла из атрибутов
+            paths = await interfax_client.download_and_extract_file(file)
+            if paths:
+                path = paths[0]
+                ext = os.path.splitext(path)[1]
                 name_part = file['type']['name'].replace(" ", "_")
-                uid = file.get("uid", "")[:6]
                 year = attrs.get("YearRep", "год")
-                clean_filename = f"{name_part}_{year}_{uid}.pdf"
+                clean_filename = f"{name_part}_{year}_{uid or 'file'}{ext}"
 
-                doc = FSInputFile(path=pdf_paths[0], filename=clean_filename)
+                doc = FSInputFile(path=path, filename=clean_filename)
                 await message.answer_document(document=doc, caption=caption, parse_mode="HTML")
             else:
-                await message.answer(f"{caption}\n❌ Не удалось получить файл.")
+                extra = f'\n🔗 <a href="{public_url}">Попробуйте открыть вручную</a>' if public_url else ''
+                await message.answer(f"{caption}\n❌ Не удалось получить файл.{extra}", parse_mode="HTML")
         except Exception as e:
-            await message.answer(f"{caption}\n❌ Ошибка при скачивании: {e}")
+            extra = f'\n🔗 <a href="{public_url}">Попробуйте открыть вручную</a>' if public_url else ''
+            await message.answer(f"{caption}\n❌ Ошибка при скачивании: {e}{extra}", parse_mode="HTML")
 
     new_offset = offset + len(batch)
     if new_offset < len(results):
@@ -153,6 +163,7 @@ async def show_next_batch(message: types.Message, state: FSMContext):
             is_sub = bool(res["is_subscribed"]) if res else False
         await message.answer("✅ Все результаты показаны.", reply_markup=main_menu(is_sub))
         await state.clear()
+
 
 
 @router.callback_query(SearchStates.showing_results, F.data == "show_more")

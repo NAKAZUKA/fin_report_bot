@@ -1,18 +1,21 @@
 # ✅ dispatcher.py
 
+import os
+from datetime import datetime
+
 from aiogram import Bot
+from aiogram.types import FSInputFile
 from loguru import logger
+
 from clients.interfax_client import interfax_client
-from utils.minio_client import upload_file
 from db import (
     get_db,
     mark_event_as_processed,
     save_report,
 )
-from datetime import datetime
-from aiogram.types import FSInputFile
-import os
+from utils.minio_client import upload_file
 from utils.cleaner import remove_temp_files
+
 
 async def process_events(bot: Bot, interfax_client):
     logger.info("🔁 Начинаю проверку новых событий через Интерфакс...")
@@ -40,69 +43,68 @@ async def process_events(bot: Bot, interfax_client):
                 continue
 
             for event in file_events:
+                uid = event["uid"]
+                file_data = event.get("file", {})
+                attrs = file_data.get("attributes", {})
+                public_url = file_data.get("publicUrl")
+
+                pub_date = attrs.get("DatePub")
+                if not pub_date or datetime.strptime(pub_date, "%d.%m.%Y").date() != datetime.utcnow().date():
+                    continue
+
+                report_type = file_data.get("type", {}).get("name", "Отчёт")
+                description = file_data.get("description", "") or "Описание отсутствует"
+
                 try:
-                    uid = event["uid"]
-                    file_data = event["file"]
-                    attrs = file_data.get("attributes", {})
-                    public_url = file_data.get("publicUrl")
-
-                    pub_date = attrs.get("DatePub")
-                    if not pub_date or datetime.strptime(pub_date, "%d.%m.%Y").date() != datetime.utcnow().date():
+                    # 🔽 Скачиваем и распаковываем
+                    paths = await interfax_client.download_and_extract_file(file_data)
+                    if not paths:
+                        logger.warning(f"⚠️ Не удалось извлечь файл(ы) для события {uid}")
                         continue
 
-                    report_type = file_data["type"]["name"]
-                    description = file_data.get("description", "")
+                    for idx, file_path in enumerate(paths):
+                        filename = os.path.basename(file_path)
+                        with open(file_path, "rb") as f:
+                            file_bytes = f.read()
 
-                    # 🔽 Скачиваем и распаковываем файл
-                    pdf_paths = await interfax_client.download_and_extract_file(file_data)
-                    if not pdf_paths:
-                        logger.warning(f"⚠️ Не удалось извлечь PDF для события {uid}")
-                        continue
+                        # ⬆️ Загрузка в MinIO
+                        minio_url = upload_file(file_bytes, filename)
 
-                    pdf_path = pdf_paths[0]  # первый PDF
-                    filename = os.path.basename(pdf_path)
+                        # 💾 В БД только один раз
+                        if idx == 0:
+                            save_report(
+                                event_uid=uid,
+                                company_name=company_name,
+                                inn=inn,
+                                report_type=report_type,
+                                report_date=pub_date,
+                                description=description,
+                                document_url_in_minio=minio_url
+                            )
+                            mark_event_as_processed(uid)
 
-                    with open(pdf_path, "rb") as f:
-                        pdf_bytes = f.read()
+                        # 📤 Отправка пользователю
+                        caption = (
+                            f"🏢 <b>{company_name}</b>\n"
+                            f"📄 Тип: <b>{report_type}</b>\n"
+                            f"🗓 Год: <b>{attrs.get('YearRep', 'не указано')}</b>\n"
+                            f"🗓 Дата публикации: <b>{pub_date}</b>\n"
+                            f"📜 {description}"
+                        )
 
-                    # ⬆️ Загружаем в MinIO
-                    minio_url = upload_file(pdf_bytes, filename)
-
-                    # 💾 Сохраняем в БД
-                    save_report(
-                        event_uid=uid,
-                        company_name=company_name,
-                        inn=inn,
-                        report_type=report_type,
-                        report_date=pub_date,
-                        description=description,
-                        document_url_in_minio=minio_url
-                    )
-                    mark_event_as_processed(uid)
-
-                    caption = (
-                        f"🏢 <b>{company_name}</b>\n"
-                        f"📄 Тип: <b>{report_type}</b>\n"
-                        f"🗓 Год: <b>{attrs.get('YearRep', 'не указано')}</b>\n"
-                        f"🗓 Дата публикации: <b>{pub_date}</b>\n"
-                        f"📜 {description or 'Описание отсутствует'}"
-                    )
-
-                    doc = FSInputFile(path=pdf_path)
-                    await bot.send_document(
-                        chat_id=user_id,
-                        document=doc,
-                        caption=caption,
-                        parse_mode="HTML"
-                    )
-
-                    logger.success(f"📤 Отчёт {uid} отправлен пользователю {user_id}.")
+                        doc = FSInputFile(path=file_path)
+                        await bot.send_document(
+                            chat_id=user_id,
+                            document=doc,
+                            caption=caption,
+                            parse_mode="HTML"
+                        )
+                        logger.success(f"📤 Файл {filename} отправлен пользователю {user_id}.")
 
                 except Exception as e:
-                    logger.error(f"❌ Ошибка при обработке отчёта {event.get('uid')} для {company_name}: {e}")
+                    logger.error(f"❌ Ошибка при обработке отчёта {uid} для {company_name}: {e}")
                 finally:
-                    # 🧹 Удаление временных файлов
-                    temp_dir = os.path.dirname(pdf_path)
-                    remove_temp_files([pdf_path, temp_dir])
+                    if 'paths' in locals() and paths:
+                        remove_temp_files(paths + [os.path.dirname(paths[0])])
 
     logger.info("✅ Фоновая проверка завершена.")

@@ -145,3 +145,46 @@ ssh root@109.172.31.67
 - Поддержка вложений сообщений
 - Хранение в PostgreSQL
 - Web-интерфейс администратора
+
+
+## 📁 docker-compose.yml
+
+```yaml
+version: "3.8"
+
+services:
+  bot:
+    build:
+      context: ./bot
+    container_name: financial-reports-bot
+    env_file:
+      - ./bot/.env
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      - minio
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f main.py || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    restart: unless-stopped
+
+volumes:
+  minio_data:
+```
